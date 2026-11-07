@@ -1,12 +1,19 @@
 name: Create Tag and Release
 
 on:
-  # Runs when a runner version change is merged into main
+  # Rebuild when the runner, image, tests, or publication workflows change
   push:
     branches:
       - main
     paths:
       - '.tool-versions'
+      - 'Dockerfile'
+      - 'pre-entrypoint.sh'
+      - 'scripts/**'
+      - '.dockerignore'
+      - '.github/actions/**'
+      - '.github/workflows/build-and-publish.yml'
+      - '.github/workflows/create-tag-and-release.yml'
   
   # Allows manual runs
   workflow_dispatch:

@@ -465,7 +465,7 @@ This repository has automated workflows to keep the image up to date:
 
 **File**: `.github/workflows/create-tag-and-release.yml`
 
-- Runs when `.tool-versions` is updated on the `main` branch
+- Runs when the runner version, image, test scripts, or publication configuration changes on `main`
 - Creates the `v{version}` tag automatically
 - Generates complete release notes
 - Publishes the release on GitHub
@@ -475,10 +475,11 @@ This repository has automated workflows to keep the image up to date:
 **File**: `.github/workflows/build-and-publish.yml`
 
 - Runs after the "Create Tag and Release" workflow completes
-- Builds the Docker image
+- Builds and smoke-tests the image on native AMD64 and ARM64 runners
 - Publishes to GitHub Container Registry (GHCR)
 - Publishes to OCIR when enabled
-- Tags created: `{version}`, `latest`, and `sha-{commit}`
+- Multi-platform tags: `{version}`, `latest`, and `sha-{commit}`
+- Architecture tags append `-amd64` or `-arm64`; shared manifests are published after both tests pass
 
 ### Automated Flow
 
@@ -865,9 +866,9 @@ which new-tool
 new-tool --version
 ```
 
-3. Add the new tool to the included tools section of this README
+3. Add the new tool to the included tools documentation and `scripts/test-image.sh`
 
-4. Open a PR. After merging image changes without a runner version update, run Create Tag and Release manually to trigger publication.
+4. Open a PR. Validate builds and tests both architectures. Merging image changes triggers Create Tag and Release and rebuilds the image even if the runner version is unchanged.
 
 ### Project Structure
 
@@ -879,6 +880,7 @@ new-tool --version
 │   ├── actions/
 │   │   └── setup-registry/             # Reads the OCIR credentials
 │   └── workflows/
+│       ├── validate.yml                # PR lint, builds, and smoke tests
 │       ├── check-runner-version.yml    # Checks for new versions
 │       ├── create-tag-and-release.yml  # Creates tags and releases
 │       └── build-and-publish.yml       # Builds and publishes the image
@@ -887,7 +889,9 @@ new-tool --version
 ├── LICENSE                             # GPL-3.0 license
 ├── Makefile                            # Local build and push
 ├── pre-entrypoint.sh                   # Fetches the token from OCI Vault
-└── README.md                           # This file
+├── scripts/test-image.sh               # Tools and entrypoint smoke tests
+├── docs/guide.md                       # This guide
+└── README.md                           # Project overview
 ```
 
 ## Image Information
@@ -959,9 +963,9 @@ This project is licensed under GPL-3.0. See the [LICENSE](../LICENSE) file for d
 
 ## Runtime and publication notes
 
-The published image currently targets AMD64; the build workflow does not assemble a multi-platform manifest. Docker commands require a reachable daemon and the permissions to use it. Validate Docker builds against your Container Instances runtime configuration. Kubernetes access requires a kubeconfig or another authentication method configured for the job.
+The publication workflow builds Linux AMD64 and ARM64 images on native runners. Version and `latest` tags are multi-platform manifests; architecture-specific tags append `-amd64` or `-arm64`. Both images must pass smoke tests before the shared manifests are published. Docker commands require a reachable daemon and the permissions to use it. Validate Docker builds against your Container Instances runtime configuration. Kubernetes access requires a kubeconfig or another authentication method configured for the job.
 
-Use a digest when an immutable image reference is required. A release can exist before its image finishes publishing. README-only changes do not trigger the release workflow; it watches `.tool-versions` on `main` and supports manual runs. Existing tags and releases are preserved by that workflow. The publication workflow checks out the branch head, so inspect its source revision when confirming which changes reached an image.
+Use a digest when an immutable image reference is required. A release can exist before its image finishes publishing. README-only changes do not trigger the release workflow; it watches `.tool-versions`, the Dockerfile, entrypoint, test scripts, and publication configuration on `main`, and supports manual runs. Existing tags and releases are preserved by that workflow. The publication workflow checks out the source SHA of the successful release workflow. Manual runs publish only from `main`. Manifest assembly uses the SHA-specific architecture tags from that build, so both platforms come from the same revision.
 
 OCI CLI and Ansible are resolved at build time. kubectl, Helm, and uv have pinned Dockerfile build arguments. Pass `RUNNER_VERSION` explicitly or use `make build`; the Dockerfile's default may differ from `.tool-versions`.
 
@@ -980,3 +984,23 @@ OCI CLI and Ansible are resolved at build time. kubectl, Helm, and uv have pinne
 | Release exists but image is missing | Build and Publish workflow status and registry destination |
 
 The Vault secret is loaded once per startup. After rotating it, restart the container to load the replacement token. The resource principal's policies also apply to OCI commands executed by jobs; grant the deployment permissions those jobs need separately from secret access.
+
+## Pull request validation
+
+The Validate workflow runs when a PR is opened, reopened, or updated, and supports manual execution. It uses read-only repository permissions and does not log in to registries or read OCIR secrets.
+
+The workflow checks GitHub Actions syntax with actionlint and shell scripts with ShellCheck. Its image matrix uses `ubuntu-24.04` for AMD64 and `ubuntu-24.04-arm` for ARM64. Each runner builds the Dockerfile with the version from `.tool-versions`, checks the image architecture, and runs `scripts/test-image.sh`.
+
+The smoke script verifies the runner binary and installed tool executables. It tests direct entrypoint delegation, successful Vault decoding, missing `SECRET_ID`, invalid or empty Vault content, and an OCI command failure. These tests use a fake token, mock the OCI command, and replace the upstream entrypoint only inside a disposable container. No runner is registered and no live Vault is accessed. They do not establish IAM access or Docker build support on a real Container Instance.
+
+Run the same checks locally:
+
+```bash
+actionlint
+shellcheck pre-entrypoint.sh scripts/test-image.sh
+version=$(awk '$1 == "github-runner" {print $2}' .tool-versions)
+docker build --build-arg RUNNER_VERSION="$version" -t oci-runner:test .
+bash scripts/test-image.sh oci-runner:test
+```
+
+For a particular platform, build with `--platform linux/amd64` or `--platform linux/arm64` and pass `amd64` or `arm64` as the test script's second argument. Running another architecture locally requires Docker emulation; CI uses native runners.

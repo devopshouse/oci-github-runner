@@ -1,6 +1,7 @@
 # GitHub Actions Runner for OCI Container Instances
 
 [![Build and Publish](https://github.com/devopshouse/oci-github-runner/actions/workflows/build-and-publish.yml/badge.svg)](https://github.com/devopshouse/oci-github-runner/actions/workflows/build-and-publish.yml)
+[![Validate](https://github.com/devopshouse/oci-github-runner/actions/workflows/validate.yml/badge.svg)](https://github.com/devopshouse/oci-github-runner/actions/workflows/validate.yml)
 [![Check Runner Version](https://github.com/devopshouse/oci-github-runner/actions/workflows/check-runner-version.yml/badge.svg)](https://github.com/devopshouse/oci-github-runner/actions/workflows/check-runner-version.yml)
 
 A custom image based on `myoung34/github-runner`, intended for self-hosted runners on OCI Container Instances. It adds OCI CLI, Ansible, kubectl, and Helm, with an entrypoint that can read the GitHub token from OCI Vault.
@@ -31,7 +32,7 @@ docker pull ghcr.io/devopshouse/oci-github-runner:latest
 docker pull ghcr.io/devopshouse/oci-github-runner:2.338.2
 ```
 
-Publication also creates `sha-<commit>` tags. Use an image digest when an immutable reference is required. The current publication workflow builds on an AMD64 runner and does not create a multi-platform manifest.
+Publication also creates `sha-<commit>` tags. Use an image digest when an immutable reference is required. Version and `latest` tags select Linux AMD64 or ARM64 automatically. Architecture-specific tags such as `2.338.2-amd64` and `2.338.2-arm64` are also published.
 
 Container Instances need access to the registry through an internet gateway in a public subnet or a NAT gateway in a private subnet.
 
@@ -137,21 +138,25 @@ The local `setup-registry` action reads these fields, masks credentials, and rej
 
 ## Automation
 
+- **Validate:** runs on PR creation and updates, or manually. Lints workflows and shell scripts, then builds and tests the image on native AMD64 and ARM64 runners. It does not publish images or read OCIR secrets.
 - **Check GitHub Runner Version:** runs daily at 04:00 UTC or manually. Checks upstream tags and opens a PR to update `.tool-versions`. An existing open PR for the same version is reused.
-- **Create Tag and Release:** runs when `.tool-versions` changes on `main`, or manually. Creates a missing `v<runner-version>` tag and release; existing tags and releases are preserved.
-- **Build and Publish Docker Image:** follows a successful release workflow or runs manually. Builds the image with the version from `.tool-versions` and publishes it to GHCR and, when enabled, OCIR.
+- **Create Tag and Release:** runs when the runner version, Dockerfile, entrypoint, test scripts, or publication configuration changes on `main`, or manually. Creates a missing `v<runner-version>` tag and release; existing tags and releases are preserved.
+- **Build and Publish Docker Image:** follows a successful release workflow or runs manually. Checks out the release workflow's exact source commit, builds and tests both architectures on native runners, then publishes multi-platform manifests to GHCR and, when enabled, OCIR. Manual publication is restricted to `main`.
 - **Dependabot:** updates SHA-pinned GitHub Actions. Other tool versions are maintained in the Dockerfile.
 
-Allow GitHub Actions to create pull requests in repository settings. CODEOWNERS assigns reviews to `@devopshouse/devops`. README-only changes do not trigger publication; image changes without a runner version update require a manual workflow run.
+Allow GitHub Actions to create pull requests in repository settings. CODEOWNERS assigns reviews to `@devopshouse/devops`. README-only changes do not trigger publication. Image changes rebuild the version and `latest` tags even when the runner version is unchanged; use a digest to pin an existing build.
 
 ## Local development
 
 ```bash
 version=$(awk '$1 == "github-runner" {print $2}' .tool-versions)
 docker build --build-arg RUNNER_VERSION="$version" -t oci-runner:test .
-docker run --rm --entrypoint bash oci-runner:test -c \
-  'oci --version && ansible --version && kubectl version --client && helm version'
+bash scripts/test-image.sh oci-runner:test
+actionlint
+shellcheck pre-entrypoint.sh scripts/test-image.sh
 ```
+
+The test script checks the installed tools and exercises the Vault entrypoint with mock tokens and OCI failures in disposable containers. It requires a local Docker daemon, without live GitHub or OCI credentials. CI repeats it natively on both architectures.
 
 `make build` also reads the runner version from `.tool-versions` and tags the image with that version and `latest`. A Docker build without the version argument uses the Dockerfile's default, which may differ from `.tool-versions`.
 
