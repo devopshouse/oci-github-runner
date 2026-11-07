@@ -1,0 +1,123 @@
+name: Build and Publish Docker Image
+
+  # Builds and publishes the GitHub Actions runner image
+on:
+  # Runs when the tag and release workflow completes successfully
+  workflow_run:
+    workflows: ["Create Tag and Release"]
+    types:
+      - completed
+    branches:
+      - main
+
+  # Allows manual runs
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: oci-github-runner
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read OCIR credentials
+        id: ocir
+        if: vars.OCIR_ENABLED == 'true'
+        uses: ./.github/actions/setup-registry
+        with:
+          PIPELINE_SECRETS: ${{ secrets.PIPELINE_SECRETS }}
+
+      # Sets up the BuildKit Docker container builder to build images and export cache
+      # https://github.com/docker/setup-buildx-action
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Logs in to the Docker registries
+      # https://github.com/docker/login-action
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to OCIR
+        if: vars.OCIR_ENABLED == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ steps.ocir.outputs.registry_url }}
+          username: ${{ steps.ocir.outputs.username }}
+          password: ${{ steps.ocir.outputs.password }}
+
+      # Reads the GitHub Runner version from .tool-versions
+      - name: Set GitHub Runner version
+        id: runner-version
+        run: |
+          RUNNER_VERSION=$(grep "github-runner" .tool-versions | awk '{print $2}')
+          echo "GitHub Runner version: ${RUNNER_VERSION}"
+          echo "runner_version=${RUNNER_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Set target images
+        id: images
+        env:
+          OCIR_FULL_URL: ${{ steps.ocir.outputs.full_url }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}"
+            if [ -n "${OCIR_FULL_URL}" ]; then
+              echo "${OCIR_FULL_URL}/${IMAGE_NAME}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Extracts Docker metadata (tags, labels)
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.images.outputs.list }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.runner-version.outputs.runner_version }}
+
+      # Builds and publishes the Docker image
+      - name: Build and publish Docker image
+        id: build-and-push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            RUNNER_VERSION=${{ steps.runner-version.outputs.runner_version }}
+
+      - name: ✅ Image published
+        if: success()
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          echo "✅ Image published successfully!"
+          echo "📦 Images:"
+          echo "${IMAGE_TAGS}"
+          echo ""
+          echo "🛠️  Included tools:"
+          echo "   - kubectl (Kubernetes CLI)"
+          echo "   - helm (Kubernetes package manager)"
+          echo "   - oci-cli (Oracle Cloud CLI)"
+          echo "   - ansible"
+          echo "   - docker, docker-compose"
+          echo "   - git, jq, yq, python3, make, gcc"

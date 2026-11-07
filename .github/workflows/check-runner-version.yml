@@ -1,0 +1,146 @@
+name: Check GitHub Runner Version
+
+on:
+  schedule:
+    # Runs daily at 4:00 AM UTC
+    - cron: '0 4 * * *'
+  # Allows manual runs from the GitHub UI
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+      - name: Get current runner version
+        id: current-version
+        run: |
+          CURRENT_VERSION=$(grep "github-runner" .tool-versions | awk '{print $2}')
+          echo "CURRENT_VERSION=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Current GitHub Runner version: ${CURRENT_VERSION}"
+
+      - name: Get latest upstream version
+        id: latest-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_VERSION=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+            https://api.github.com/repos/myoung34/docker-github-actions-runner/tags | jq -r '.[0].name' | sed 's/^v//')
+
+          if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" == "null" ]; then
+            echo "Error: Could not get the latest GitHub Runner version."
+            exit 1
+          fi
+
+          if [[ ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Error: Invalid version format."
+            exit 1
+          fi
+
+          echo "LATEST_VERSION=${LATEST_VERSION}" >> "$GITHUB_OUTPUT"
+          RELEASE_URL="https://github.com/actions/runner/releases/tag/v${LATEST_VERSION}"
+          echo "RELEASE_URL=${RELEASE_URL}" >> "$GITHUB_OUTPUT"
+          echo "Latest available version: ${LATEST_VERSION}"
+
+      - name: Check whether an update is needed
+        id: check-update
+        env:
+          CURRENT_VERSION: ${{ steps.current-version.outputs.CURRENT_VERSION }}
+          LATEST_VERSION: ${{ steps.latest-version.outputs.LATEST_VERSION }}
+        run: |
+          if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+            echo "UPDATE_NEEDED=true" >> "$GITHUB_OUTPUT"
+            echo "New version detected: ${LATEST_VERSION}"
+          else
+            echo "UPDATE_NEEDED=false" >> "$GITHUB_OUTPUT"
+            echo "Already on the latest version: ${CURRENT_VERSION}"
+          fi
+
+      - name: Create update branch
+        if: steps.check-update.outputs.UPDATE_NEEDED == 'true'
+        id: create-branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_VERSION: ${{ steps.latest-version.outputs.LATEST_VERSION }}
+        run: |
+          BRANCH_NAME="update-runner-${LATEST_VERSION}"
+
+          PR_EXIST=$(gh pr list --head "$BRANCH_NAME" --state open --json number --template '{{range .}}{{.number}}{{end}}')
+          if [ -n "$PR_EXIST" ]; then
+            echo "A PR is already open for this branch (PR #${PR_EXIST}). No action taken."
+            echo "PR_EXISTS=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+             echo "PR_EXISTS=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          git checkout -b "${BRANCH_NAME}"
+          sed -i "s/github-runner .*$/github-runner ${LATEST_VERSION}/" .tool-versions
+
+          git add .tool-versions
+          git commit -m "Update GitHub Runner to version ${LATEST_VERSION}"
+          git push --force --set-upstream origin "${BRANCH_NAME}"
+
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "RUNNER_VERSION=${LATEST_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR Body File
+        if: steps.check-update.outputs.UPDATE_NEEDED == 'true' && steps.create-branch.outputs.PR_EXISTS == 'false'
+        env:
+          LATEST_VERSION: ${{ steps.latest-version.outputs.LATEST_VERSION }}
+          RELEASE_URL: ${{ steps.latest-version.outputs.RELEASE_URL }}
+        run: |
+          {
+            echo "🚀 **GitHub Runner Version Update** 🔄"
+            echo ""
+            echo "This PR was opened automatically to update **GitHub Runner** to the latest version! 🛠️"
+            echo ""
+            echo "**🔹 New GitHub Runner version:** \`${LATEST_VERSION}\`"
+            echo "**📜 Release Notes:** [View changes](${RELEASE_URL}) 🔗"
+            echo ""
+            echo "### 📌 What changed?"
+            echo "- Updated the **GitHub Runner version** in \`.tool-versions\` 📜"
+            echo "- Base image: \`myoung34/docker-github-actions-runner:${LATEST_VERSION}\`"
+            echo "- Tracks the latest stable version 🚦"
+            echo ""
+            echo "### 🛠️ Tools included in the image"
+            echo "- ☸️ **kubectl** - Kubernetes CLI"
+            echo "- ⎈ **helm** - Kubernetes package manager"
+            echo "- ☁️ **oci-cli** - Oracle Cloud Infrastructure CLI"
+            echo "- 🤖 **ansible** - Configuration automation"
+            echo "- 🔧 **Others**: docker, docker-compose, git, jq, yq, python3, make, gcc"
+            echo ""
+            echo "### ✅ Next steps"
+            echo "👀 **Please review and merge** if everything looks right!"
+            echo "🔄 After the merge, a new Docker image build starts automatically."
+            echo ""
+            echo "🎉 Stay up to date! 🚀"
+          } > pr-body.md
+
+      - name: Create pull request
+        if: steps.check-update.outputs.UPDATE_NEEDED == 'true' && steps.create-branch.outputs.PR_EXISTS == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_VERSION: ${{ steps.latest-version.outputs.LATEST_VERSION }}
+          BRANCH_NAME: ${{ steps.create-branch.outputs.BRANCH_NAME }}
+        run: |
+          PR_BODY=$(cat pr-body.md)
+          PR_TITLE="Update GitHub Runner to version ${LATEST_VERSION}"
+          
+          # The reviewer comes from .github/CODEOWNERS.
+          gh pr create \
+            --title "${PR_TITLE}" \
+            --body "${PR_BODY}" \
+            --base main \
+            --head "${BRANCH_NAME}"

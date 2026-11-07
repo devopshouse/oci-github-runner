@@ -1,0 +1,184 @@
+name: Create Tag and Release
+
+on:
+  # Runs when a runner version change is merged into main
+  push:
+    branches:
+      - main
+    paths:
+      - '.tool-versions'
+  
+  # Allows manual runs
+  workflow_dispatch:
+
+jobs:
+  create-tag-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+      
+      - name: Extract runner version
+        id: extract-version
+        run: |
+          RUNNER_VERSION=$(grep "github-runner" .tool-versions | awk '{print $2}')
+          if [[ ! "$RUNNER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Error: Invalid version format in .tool-versions."
+            exit 1
+          fi
+          echo "RUNNER_VERSION=${RUNNER_VERSION}" >> "$GITHUB_ENV"
+          echo "GitHub Runner version: ${RUNNER_VERSION}"
+      
+      - name: Check whether the tag exists
+        id: check-tag
+        run: |
+          TAG_NAME="v${RUNNER_VERSION}"
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "TAG_EXISTS=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG_NAME already exists"
+          else
+            echo "TAG_EXISTS=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG_NAME does not exist and will be created"
+          fi
+      
+      - name: Check whether the release exists
+        id: check-release
+        if: steps.check-tag.outputs.TAG_EXISTS == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${RUNNER_VERSION}"
+          
+          if gh release view "${TAG_NAME}" &>/dev/null; then
+            echo "RELEASE_EXISTS=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG_NAME already exists"
+          else
+            echo "RELEASE_EXISTS=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG_NAME does not exist and will be created"
+          fi
+      
+      - name: Create and push tag
+        if: steps.check-tag.outputs.TAG_EXISTS == 'false'
+        run: |
+          TAG_NAME="v${RUNNER_VERSION}"
+          git tag -a "${TAG_NAME}" -m "Release ${TAG_NAME} - GitHub Runner ${TAG_NAME}"
+          git push origin "${TAG_NAME}"
+          echo "TAG_NAME=${TAG_NAME}" >> "$GITHUB_ENV"
+          echo "Tag created and pushed: ${TAG_NAME}"
+      
+      - name: Generate release notes
+        if: steps.check-tag.outputs.TAG_EXISTS == 'false' || (steps.check-tag.outputs.TAG_EXISTS == 'true' && steps.check-release.outputs.RELEASE_EXISTS == 'false')
+        run: |
+          cat > release_body.md << EOL
+          ## 🎉 GitHub Runner ${RUNNER_VERSION}
+
+          This release contains version **${RUNNER_VERSION}** of GitHub Runner with additional CI/CD tools.
+
+          ### 🛠️ Included Tools
+
+          #### ☸️ Kubernetes Tools
+          - **kubectl** - Official Kubernetes CLI
+          - **helm** - Kubernetes package manager
+
+          #### ☁️ Cloud Tools
+          - **oci-cli** - Oracle Cloud Infrastructure CLI
+          - **ansible** - Configuration automation
+
+          #### 🔧 Development Tools
+          - **docker, docker-compose** - Container build and execution
+          - **git** - Version control system
+          - **jq** - JSON processor
+          - **yq** - YAML processor
+          - **python3** - Python 3 with pip
+          - **make, gcc, g++** - Build tools
+
+          ### 🐳 How to use this image
+
+          #### Pull the image
+          \`\`\`bash
+          docker pull ghcr.io/${GITHUB_REPOSITORY}:${RUNNER_VERSION}
+          docker pull ghcr.io/${GITHUB_REPOSITORY}:latest
+          \`\`\`
+
+          #### Using in GitHub Actions workflows
+          Configure your Kubernetes runners to use this image:
+
+          \`\`\`yaml
+          template:
+            spec:
+              containers:
+              - name: runner
+                image: ghcr.io/${GITHUB_REPOSITORY}:${RUNNER_VERSION}
+          \`\`\`
+
+          #### Workflow usage example
+          \`\`\`yaml
+          jobs:
+            build:
+              runs-on: self-hosted
+              steps:
+                - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+                
+                - name: Deploy with kubectl
+                  run: |
+                    kubectl apply -f deployment.yaml
+          \`\`\`
+
+          ### 🔄 Based on
+          - Base image: [myoung34/docker-github-actions-runner:${RUNNER_VERSION}](https://github.com/myoung34/docker-github-actions-runner/releases/tag/v${RUNNER_VERSION})
+          - Dockerfile: [Dockerfile](https://github.com/${GITHUB_REPOSITORY}/blob/main/Dockerfile)
+
+          ### 📝 Upstream release notes
+          For full details about this runner version, see the [original release notes](https://github.com/myoung34/docker-github-actions-runner/releases/tag/v${RUNNER_VERSION})
+
+          ### 🔒 Security
+          - Based on the myoung34/docker-github-actions-runner image
+          
+          ### 📖 Documentation
+          - [Main README](https://github.com/${GITHUB_REPOSITORY}/blob/main/README.md)
+          EOL
+          
+          echo "Release notes generated successfully"
+      
+      - name: Create release
+        if: steps.check-tag.outputs.TAG_EXISTS == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${RUNNER_VERSION}"
+          RELEASE_TITLE="🎉 Release ${TAG_NAME}"
+          
+          gh release create "${TAG_NAME}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file release_body.md
+          
+          echo "Release and tag created: ${RELEASE_TITLE}"
+      
+      - name: Create release for existing tag
+        if: steps.check-tag.outputs.TAG_EXISTS == 'true' && steps.check-release.outputs.RELEASE_EXISTS == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v${RUNNER_VERSION}"
+          RELEASE_TITLE="🎉 Release ${TAG_NAME}"
+          
+          gh release create "${TAG_NAME}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file release_body.md
+          
+          echo "Release created for existing tag: ${RELEASE_TITLE}"
+      
+      - name: Report existing status
+        if: steps.check-tag.outputs.TAG_EXISTS == 'true' && steps.check-release.outputs.RELEASE_EXISTS == 'true'
+        run: |
+          echo "Tag v${RUNNER_VERSION} and its release already exist. No action needed."

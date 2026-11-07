@@ -1,0 +1,54 @@
+name: setup-registry
+description: Reads the OCIR credentials from PIPELINE_SECRETS
+
+inputs:
+  PIPELINE_SECRETS:
+    description: JSON with OCIR_URL, OCIR_NAMESPACE, OCIR_USERNAME, and OCIR_PASSWORD
+    required: true
+
+outputs:
+  registry_url:
+    description: Registry endpoint
+    value: ${{ steps.read.outputs.registry_url }}
+  username:
+    description: Registry username
+    value: ${{ steps.read.outputs.username }}
+  password:
+    description: Registry password
+    value: ${{ steps.read.outputs.password }}
+  full_url:
+    description: Endpoint and namespace, in url/namespace format
+    value: ${{ steps.read.outputs.full_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read credentials
+      id: read
+      shell: bash
+      env:
+        PIPELINE_SECRETS: ${{ inputs.PIPELINE_SECRETS }}
+      run: |
+        set -euo pipefail
+
+        read_field() {
+          if ! jq -er --arg key "$1" '.[$key] // empty | select(. != "")' <<<"$PIPELINE_SECRETS" 2>/dev/null; then
+            echo "::error::Field $1 is missing or PIPELINE_SECRETS is invalid JSON" >&2
+            return 1
+          fi
+        }
+
+        registry_url=$(read_field OCIR_URL)
+        namespace=$(read_field OCIR_NAMESPACE)
+        username=$(read_field OCIR_USERNAME)
+        password=$(read_field OCIR_PASSWORD)
+
+        echo "::add-mask::$username"
+        echo "::add-mask::$password"
+
+        {
+          echo "registry_url=$registry_url"
+          echo "username=$username"
+          echo "password=$password"
+          echo "full_url=$registry_url/$namespace"
+        } >> "$GITHUB_OUTPUT"
